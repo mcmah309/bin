@@ -10,6 +10,10 @@ for every operation. Native trash operations use the [trash crate](https://docs.
 cargo install --path . --locked
 ```
 
+Building requires Rust and a C compiler for the bundled SQLite library. SQLite
+does not need to be installed separately. Cross-compilation also requires a C
+toolchain for the target platform.
+
 ## Usage
 
 ```sh
@@ -84,11 +88,47 @@ restored and the remaining entries stay in history for retry. Native restoration
 also checks collisions, but a concurrent external process modifying restore paths
 is outside the transaction; pop is not a filesystem-wide atomic operation.
 
-History writes are atomic and synced. Mutating `bin` processes sharing a history
-directory exclude one another with a lock. A pending receipt is written before
-each native trash operation, allowing the next invocation to recover an
-interrupted operation when its native trash identity can be determined uniquely.
-Ambiguous recovery fails with the pending history intact.
+History uses **SQLite** (`history.sqlite3`) through
+[rusqlite](https://docs.rs/rusqlite/), with SQLite bundled into the executable.
+Invocations, item receipts, and pending operations have separate tables. Native
+trash IDs and original paths are stored as lossless BLOBs. Indexed inserts and
+deletes update only affected rows; commands do not deserialize or rewrite the
+entire history. Pop reads recent invocations in reverse order through an index
+and skips receipts for items already restored or purged elsewhere. Stale receipts
+are removed from the invocations visited during pop. Freed database pages are
+reused by subsequent writes.
+The native trash backend still enumerates system trash to identify receipts;
+SQLite removes the separate cost of reading and rewriting the full history.
+
+Transactions commit a pending receipt before each native trash operation, then
+atomically replace it with the successful receipt. SQLite uses durable rollback
+journaling with `synchronous=EXTRA`. Mutating `bin` processes sharing a history
+directory also exclude one another with `history.lock` for the full filesystem
+operation. The next invocation can recover an interrupted operation when its
+native trash identity can be determined uniquely. Ambiguous recovery fails with
+the pending history intact.
+
+Filesystem changes outside `bin` are reconciled during pop. If a tracked trash
+item was manually deleted, restored, or has different native receipt metadata,
+its stale receipt is skipped and removed from the groups visited by pop. A group
+with surviving items still counts as one invocation; completely missing groups
+are skipped. Pop checks that enough restorable groups remain before restoring
+anything. Dry runs preview this reconciliation without changing the database.
+
+On FreeDesktop systems, a surviving `.trashinfo` file does not count as a
+restorable item when its payload is missing. Emptying can still remove that
+orphaned metadata. If metadata was deleted but its payload survives, the payload
+is left untouched for manual recovery from the system trash. Deleted children
+inside a trashed directory stay deleted; pop restores the directory's surviving
+contents. Missing destination parents are recreated. Existing destination files
+and parents replaced by files or symlinks cause pop to fail without overwriting.
+
+If an interrupted operation has no source and no identifiable restorable trash
+item left, `bin` reports and discards only its pending receipt so it cannot block
+future commands. Inspection errors and ambiguous recovery preserve history for
+retry. These cases reconcile tracking; permanently deleted file contents cannot
+be reconstructed. An unreadable or corrupted SQLite database is preserved and
+refused before trash operations; restore a database backup to recover its groups.
 
 ## Emptying and ages
 
@@ -144,12 +184,25 @@ notice that undo history is unavailable. macOS pop/empty need a separate native
 backend or upstream support; `bin` does not replace system trash with a private
 directory to emulate them. Other Unix platforms depend on `trash`'s mount support.
 
-History normally lives in `$XDG_STATE_HOME/bin` (or `~/.local/state/bin`) on Linux
-and the local application data directory on Windows. Set `BIN_STATE_DIR` to use
-another history directory. Keep it stable across commands if you want shared
-undo history. Native filenames are stored losslessly, including non-UTF-8 paths
-on Unix. Moving or deleting the history file does not delete trashed data, but
-loses invocation grouping. Dry runs never create the state directory.
+The database normally lives at `$XDG_STATE_HOME/bin/history.sqlite3` (or
+`~/.local/state/bin/history.sqlite3`) on Linux and in the local application data
+directory under `bin` on Windows. Set `BIN_STATE_DIR` to use another history
+directory. Keep it stable across commands if you want shared undo history.
+Native filenames are stored losslessly, including non-UTF-8 paths on Unix.
+Moving or deleting the database does not delete trashed data, but loses invocation
+grouping. The database has a versioned schema; unknown versions are refused.
+
+Existing `history.json` files are imported automatically in a single transaction
+when the SQLite database is first initialized by a normal command. Invocation
+order, grouping, and pending recovery records are preserved. The original JSON
+is retained unchanged as a backup and is ignored after a successful import; it
+can be removed once the migration is verified. Do not remove the SQLite database
+while retaining this backup unless you intend to import the backup again.
+
+Dry runs open an existing database read-only, never create the state directory or
+database, and never change history. If only legacy JSON exists, its history is
+loaded into an in-memory SQLite database for the preview without migrating it on
+disk. Pending-operation recovery is also simulated in memory during a preview.
 
 ## Development
 

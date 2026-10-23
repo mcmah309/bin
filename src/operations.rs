@@ -1,7 +1,7 @@
 use crate::{
     backend::{Backend, SystemTrash},
     cli::{Cli, Interactive, PreserveRoot},
-    history::{History, Invocation, ItemKey, NativeString, Pending, Store, same_path},
+    history::{ItemKey, Store, same_path},
 };
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -45,23 +45,42 @@ fn run_with(cli: &Cli, backend: &mut impl Backend, state_dir: PathBuf) -> Result
         .as_ref()
         .map(|age| age.cutoff(Utc::now()))
         .transpose()?;
-    let (store, mut history) = Store::open(state_dir, cli.dry_run)?;
+    let mut store = Store::open(state_dir, cli.dry_run)?;
+    let mut live = Vec::new();
     if cli.pop.is_some() || cli.empty || !cli.dry_run {
         // The crate exposes only trashing on macOS, so don't require a list for
         // its basic delete operation. Undo/cleanup fail explicitly there.
         let must_list = backend.supports_history() || cli.pop.is_some() || cli.empty;
         if must_list {
-            let live = backend.list().context("cannot list the system trash")?;
-            history.reconcile(&live)?;
+            live = backend.list().context("cannot list the system trash")?;
+            let available = if cli.pop.is_some() || store.has_pending()? {
+                Some(
+                    live.iter()
+                        .filter_map(|item| match backend.available(item) {
+                            Ok(true) => Some(Ok(item.clone())),
+                            Ok(false) => None,
+                            Err(error) => Some(Err(error)),
+                        })
+                        .collect::<Result<Vec<_>>>()?,
+                )
+            } else {
+                None
+            };
+            store.recover_pending(available.as_deref().unwrap_or(&live))?;
             if let Some(count) = cli.pop {
-                return pop(cli, count as usize, backend, &store, &mut history, &live);
+                return pop(
+                    cli,
+                    count as usize,
+                    backend,
+                    &mut store,
+                    available.as_deref().unwrap(),
+                );
             }
             if cli.empty {
                 return empty(
                     cli,
                     backend,
-                    &store,
-                    &mut history,
+                    &mut store,
                     &live,
                     matcher.as_ref(),
                     cutoff.map(|date| date.timestamp()),
@@ -69,7 +88,7 @@ fn run_with(cli: &Cli, backend: &mut impl Backend, state_dir: PathBuf) -> Result
             }
         }
     }
-    trash_paths(cli, backend, &store, &mut history)
+    trash_paths(cli, backend, &mut store, &mut live)
 }
 
 fn ask(message: &str) -> Result<bool> {
@@ -94,8 +113,8 @@ fn explain(cli: &Cli, verb: &str, path: &Path) {
 fn trash_paths(
     cli: &Cli,
     backend: &mut impl Backend,
-    store: &Store,
-    history: &mut History,
+    store: &mut Store,
+    live: &mut Vec<TrashItem>,
 ) -> Result<bool> {
     if !cli.dry_run
         && cli.interaction() == Some(Interactive::Once)
@@ -150,45 +169,31 @@ fn trash_paths(
                     "bin: macOS trashing succeeded; pop history is unavailable on this platform"
                 );
             } else {
-                let live = backend.list()?;
-                let before = live
+                let before: Vec<_> = live
                     .iter()
                     .filter(|item| same_path(&item.original_path(), &path))
                     .map(ItemKey::from)
                     .collect();
-                let index = *invocation_index.get_or_insert_with(|| {
-                    history.invocations.push(Invocation::default());
-                    history.invocations.len() - 1
-                });
-                history.invocations[index].pending = Some(Pending {
-                    original: NativeString::new(path.as_os_str()),
-                    before,
-                });
-                store.save(history)?;
+                let index = store.begin_trash(invocation_index, &path, &before)?;
+                invocation_index = Some(index);
                 let deletion = backend.trash(&path);
                 let after = backend.list().context("cannot record the trash receipt; the pending operation will be reconciled next time")?;
-                // Do not prune the in-progress invocation: a failed first operand
-                // must not invalidate the index used by subsequent operands.
-                let pending = history.invocations[index].pending.as_ref().unwrap();
                 let candidates: Vec<_> = after
                     .iter()
                     .filter(|item| same_path(&item.original_path(), &path))
-                    .filter(|item| !pending.before.contains(&ItemKey::from(*item)))
+                    .map(ItemKey::from)
+                    .filter(|key| !before.contains(key))
                     .collect();
                 match candidates.as_slice() {
-                    [item] => {
-                        history.invocations[index].items.push(ItemKey::from(*item));
-                        history.invocations[index].pending = None;
-                        store.save(history)?;
-                    }
+                    [key] => store.finish_trash(index, Some(key))?,
                     [] if deletion.is_err() && fs::symlink_metadata(&path).is_ok() => {
-                        history.invocations[index].pending = None;
-                        store.save(history)?;
+                        store.finish_trash(index, None)?;
                     }
                     _ => bail!(
                         "could not identify the trash receipt for {path:?}; pending history preserved for recovery"
                     ),
                 }
+                *live = after;
                 deletion?;
             }
             explain(cli, "trashed", &path);
@@ -198,16 +203,13 @@ fn trash_paths(
             eprintln!("bin: cannot trash {operand:?}: {error:#}");
             success = false;
             // Continuing could replace a pending receipt and lose undo history.
-            if history.invocations.iter().any(|inv| inv.pending.is_some()) {
+            if store.has_pending()? {
                 break;
             }
         }
     }
-    if !cli.dry_run {
-        history
-            .invocations
-            .retain(|inv| !inv.items.is_empty() || inv.pending.is_some());
-        store.save(history)?;
+    if let Some(index) = invocation_index {
+        store.finish_invocation(index)?;
     }
     Ok(success)
 }
@@ -297,23 +299,10 @@ fn pop(
     cli: &Cli,
     count: usize,
     backend: &mut impl Backend,
-    store: &Store,
-    history: &mut History,
+    store: &mut Store,
     live: &[TrashItem],
 ) -> Result<bool> {
-    if count > history.invocations.len() {
-        bail!(
-            "requested {count} invocation(s), but only {} restorable invocation(s) remain",
-            history.invocations.len()
-        );
-    }
-    let keys: HashSet<_> = history
-        .invocations
-        .iter()
-        .rev()
-        .take(count)
-        .flat_map(|invocation| invocation.items.iter().cloned())
-        .collect();
+    let keys = store.latest_keys(count, live)?;
     let mut selected: Vec<_> = live
         .iter()
         .filter(|item| keys.contains(&ItemKey::from(*item)))
@@ -349,8 +338,7 @@ fn pop(
             backend.restore(item.clone()).with_context(|| {
                 format!("cannot restore {path:?}; remaining history is preserved")
             })?;
-            remove_receipt(history, &ItemKey::from(&item));
-            store.save(history)?;
+            store.remove_item(&ItemKey::from(&item))?;
         }
         explain(cli, if cli.dry_run { "restore" } else { "restored" }, &path);
     }
@@ -396,8 +384,7 @@ fn preflight_restore(items: &[TrashItem]) -> Result<()> {
 fn empty(
     cli: &Cli,
     backend: &mut impl Backend,
-    store: &Store,
-    history: &mut History,
+    store: &mut Store,
     live: &[TrashItem],
     matcher: Option<&GlobMatcher>,
     cutoff: Option<i64>,
@@ -438,8 +425,7 @@ fn empty(
                 success = false;
                 continue;
             }
-            remove_receipt(history, &ItemKey::from(item));
-            store.save(history)?;
+            store.remove_item(&ItemKey::from(item))?;
         }
         explain(
             cli,
@@ -454,15 +440,6 @@ fn empty(
     Ok(success)
 }
 
-fn remove_receipt(history: &mut History, key: &ItemKey) {
-    for invocation in &mut history.invocations {
-        invocation.items.retain(|item| item != key);
-    }
-    history
-        .invocations
-        .retain(|invocation| !invocation.items.is_empty());
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,11 +450,27 @@ mod tests {
         root: PathBuf,
         items: Vec<TrashItem>,
         next: usize,
+        inspection_error: Option<OsString>,
     }
 
     impl Backend for FakeTrash {
         fn list(&self) -> Result<Vec<TrashItem>> {
             Ok(self.items.clone())
+        }
+
+        fn available(&self, item: &TrashItem) -> Result<bool> {
+            if self.inspection_error.as_ref() == Some(&item.id) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "simulated trash inspection denial",
+                )
+                .into());
+            }
+            match fs::symlink_metadata(Path::new(&item.id)) {
+                Ok(_) => Ok(true),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(error.into()),
+            }
         }
 
         fn trash(&mut self, path: &Path) -> Result<()> {
@@ -539,6 +532,7 @@ mod tests {
                     root: trash,
                     items: vec![],
                     next: 0,
+                    inspection_error: None,
                 },
                 _root: root,
             }
@@ -644,12 +638,12 @@ mod tests {
         assert!(a.exists());
         assert!(!f.state.exists());
         f.run(&[], &[&a]).unwrap();
-        let before = fs::read(f.state.join("history.json")).unwrap();
+        let before = fs::read(f.state.join("history.sqlite3")).unwrap();
         f.run(&["-p", "--dry-run"], &[]).unwrap();
         f.run(&["--empty", "--all", "--dry-run"], &[]).unwrap();
         assert!(!a.exists());
         assert_eq!(f.backend.items.len(), 1);
-        assert_eq!(before, fs::read(f.state.join("history.json")).unwrap());
+        assert_eq!(before, fs::read(f.state.join("history.sqlite3")).unwrap());
     }
 
     #[test]
@@ -692,19 +686,61 @@ mod tests {
         let mut f = Fixture::new();
         let a = f.file("a");
         {
-            let (store, mut history) = Store::open(f.state.clone(), false).unwrap();
-            history.invocations.push(Invocation {
-                items: vec![],
-                pending: Some(Pending {
-                    original: NativeString::new(a.as_os_str()),
-                    before: vec![],
-                }),
-            });
-            store.save(&history).unwrap();
+            let mut store = Store::open(f.state.clone(), false).unwrap();
+            store.begin_trash(None, &a, &[]).unwrap();
             f.backend.trash(&a).unwrap();
         }
         f.run(&["-p"], &[]).unwrap();
         assert_eq!(fs::read_to_string(a).unwrap(), "a");
+    }
+
+    #[test]
+    fn manually_deleted_pending_payload_does_not_block_older_or_future_invocations() {
+        let mut f = Fixture::new();
+        let older = f.file("older");
+        let lost = f.file("lost");
+        f.run(&[], &[&older]).unwrap();
+        {
+            let mut store = Store::open(f.state.clone(), false).unwrap();
+            store.begin_trash(None, &lost, &[]).unwrap();
+            f.backend.trash(&lost).unwrap();
+            fs::remove_file(Path::new(&f.backend.items.last().unwrap().id)).unwrap();
+        }
+        let before = fs::read(f.state.join("history.sqlite3")).unwrap();
+        f.run(&["-p", "--dry-run"], &[]).unwrap();
+        assert!(!older.exists());
+        assert!(!lost.exists());
+        assert_eq!(before, fs::read(f.state.join("history.sqlite3")).unwrap());
+        f.run(&["-p"], &[]).unwrap();
+        assert_eq!(fs::read_to_string(older).unwrap(), "older");
+        assert!(!lost.exists());
+        {
+            let store = Store::open(f.state.clone(), false).unwrap();
+            assert!(!store.has_pending().unwrap());
+        }
+        let next = f.file("next");
+        f.run(&[], &[&next]).unwrap();
+        f.run(&["-p"], &[]).unwrap();
+        assert_eq!(fs::read_to_string(next).unwrap(), "next");
+    }
+
+    #[test]
+    fn inspection_errors_preserve_every_receipt_and_can_be_retried() {
+        let mut f = Fixture::new();
+        let a = f.file("a");
+        let b = f.file("b");
+        f.run(&[], &[&a, &b]).unwrap();
+        f.backend.inspection_error = Some(f.backend.items[0].id.clone());
+        let before = fs::read(f.state.join("history.sqlite3")).unwrap();
+        assert!(f.run(&["-p"], &[]).is_err());
+        assert_eq!(before, fs::read(f.state.join("history.sqlite3")).unwrap());
+        assert!(!a.exists());
+        assert!(!b.exists());
+        assert_eq!(f.backend.items.len(), 2);
+        f.backend.inspection_error = None;
+        f.run(&["-p"], &[]).unwrap();
+        assert_eq!(fs::read_to_string(a).unwrap(), "a");
+        assert_eq!(fs::read_to_string(b).unwrap(), "b");
     }
 
     #[test]
@@ -717,7 +753,7 @@ mod tests {
         let state = f.state.clone();
         assert!(!f.run(&["-r"], &[&state]).unwrap());
         assert!(!f.run(&[], &[&state.join("history.lock")]).unwrap());
-        assert!(!f.run(&[], &[&state.join("history.json")]).unwrap());
+        assert!(!f.run(&[], &[&state.join("history.sqlite3")]).unwrap());
         assert!(state.exists());
         assert_eq!(f.backend.items.len(), 1);
     }
