@@ -1,0 +1,19 @@
+[package]
+name = "bin"
+version = "0.1.0"
+edition = "2024"
+description = "An rm-style CLI with system trash, invocation undo, and filtered cleanup"
+license = "Apache-2.0"
+
+[dependencies]
+anyhow = "1.0.104"
+chrono = { version = "0.4.45", features = ["serde"] }
+clap = { version = "4.6.7", features = ["derive"] }
+directories = "6.0.0"
+dunce = "1.0.5"
+fs2 = "0.4.3"
+globset = "0.4.20"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tempfile = "3.27.0"
+trash = { version = "5.2.9", features = ["chrono"] }
