@@ -8,6 +8,9 @@ use std::path::PathBuf;
     after_help = "Examples:\n  bin -rf build/\n  bin -p             Restore the last invocation\n  bin -p 3           Restore the last three invocations\n  bin --empty --older-than '2mo 3d' --glob '*.txt'\n  bin --empty --all --dry-run\n\nEmpty filters combine with AND. For OR, run separate commands.\n--all cannot be combined with --older-than or --glob.\nPop never overwrites, even with -f. Emptying permanently deletes matching trash entries."
 )]
 pub struct Cli {
+    /// Read configuration from this TOML file instead of the user's config directory
+    #[arg(long, value_name = "FILE")]
+    pub config: Option<PathBuf>,
     /// Ignore nonexistent operands and never prompt (does not allow overwriting on pop)
     #[arg(short, long, overrides_with_all = ["each", "once", "interactive"])]
     pub force: bool,

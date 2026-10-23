@@ -1,6 +1,9 @@
 mod age;
 mod backend;
 mod cli;
+mod config;
+#[cfg(all(unix, not(target_os = "macos")))]
+mod freedesktop;
 mod history;
 mod operations;
 

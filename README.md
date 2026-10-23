@@ -2,7 +2,9 @@
 
 `bin` is an `rm`-style Rust CLI that moves files into the operating system's trash.
 It adds undo by **command invocation**, filtered permanent cleanup, and previews
-for every operation. Native trash operations use the [trash crate](https://docs.rs/trash/).
+for every operation. `bin` implements FreeDesktop trash storage directly on Linux
+and other supported Unix systems. Windows and macOS use the unmodified upstream
+[trash crate](https://docs.rs/trash/).
 
 ## Install
 
@@ -37,6 +39,55 @@ bin --empty --older-than '2mo 2d' --glob '*.txt' --dry-run
 Normal trashing is silent; `-v` explains actions. `--dry-run` always prints what
 would happen, performs the same validation, and changes no files, trash entries,
 or history. It does not prompt. A dry run is a snapshot, not a reservation.
+
+## Trash location and configuration
+
+On Linux and other FreeDesktop systems, **all new deletions go to the user's
+home trash by default**: `$XDG_DATA_HOME/Trash`, normally
+`~/.local/share/Trash`. This includes files from other mounted filesystems and
+bind-mounted workspaces. `bin` does not create a per-mount `.Trash-UID` directory
+in this mode. If home trash cannot be used, the operation fails and reports the
+error rather than silently choosing another trash directory.
+
+Configuration is optional. On Linux, `bin` reads
+`$XDG_CONFIG_HOME/bin/config.toml`, normally `~/.config/bin/config.toml`:
+
+```toml
+trash-location = "home"
+```
+
+To use the previous policy, which prefers trash on each file's own filesystem:
+
+```toml
+trash-location = "per-filesystem"
+```
+
+That policy uses the home trash for files on its filesystem, and otherwise uses
+the source mount's `.Trash/$UID` or `.Trash-$UID` directory when available. It
+falls back to home trash if the mount's trash cannot
+be created due to permissions. See [config.example.toml](config.example.toml).
+
+Use `bin --config /path/to/config.toml ...` to select another configuration file.
+A missing default config uses `home`; an explicitly selected missing file, invalid
+TOML, unknown keys, or an unknown location value fails before any trash operation.
+Dry runs read configuration but never create or modify it.
+
+Cross-filesystem trashing and restoration copy the complete payload before
+removing the source, so large directories can take longer and require space on
+the destination filesystem. Regular file/directory modes and timestamps are
+preserved, and symlinks are copied without following their targets. Ownership,
+hard-link relationships, ACLs, and extended attributes may differ after copying
+between filesystems. Special files that cannot be copied (such as sockets) cause
+the operation to fail. Failed copies leave the source intact and clean up partial
+destinations. If source cleanup fails after a complete copy, the complete backup
+is retained with its trash receipt and the error is reported.
+
+Changing configuration affects **new deletions only**. Existing trash entries,
+including old per-mount entries, keep their original locations and remain
+available to pop and empty. All locations retain the standard FreeDesktop format
+for interoperability with other trash utilities. Windows and macOS retain their
+native operating system trash placement; `trash-location` applies to FreeDesktop
+systems.
 
 ## rm compatibility
 
@@ -182,7 +233,10 @@ matching receipts from pop history.
 The full workflow targets Linux and Windows. macOS trashing currently emits a
 notice that undo history is unavailable. macOS pop/empty need a separate native
 backend or upstream support; `bin` does not replace system trash with a private
-directory to emulate them. Other Unix platforms depend on `trash`'s mount support.
+directory to emulate them. Other Unix platforms use `bin`'s mount discovery;
+BSD support is implemented but is not covered by the native CI matrix.
+Configuration lives under the platform's user config directory (`%APPDATA%/bin`
+on Windows, `~/Library/Application Support/bin` on macOS); `--config` overrides it.
 
 The database normally lives at `$XDG_STATE_HOME/bin/history.sqlite3` (or
 `~/.local/state/bin/history.sqlite3`) on Linux and in the local application data
@@ -212,6 +266,24 @@ cargo clippy --all-targets -- -D warnings
 cargo test --locked
 ```
 
-Unit tests use a filesystem-backed mock trash. Linux integration tests exercise
-the actual `trash` crate with isolated XDG data and history directories; permanent
-cleanup tests select unique sandbox filenames and never empty a global trash.
+Unit tests use a filesystem-backed mock trash and test the storage primitives.
+Linux integration tests exercise `bin`'s own backend with isolated XDG data and
+history directories; permanent cleanup tests select unique sandbox filenames
+and never empty a global trash. Interoperability tests use the unmodified upstream
+`trash` crate in a subprocess to inspect and restore entries written by `bin`,
+and verify that `bin` can restore entries and existing SQLite receipts produced
+by the old backend. Malformed metadata, orphaned payloads, binary and long names,
+and private permissions are covered.
+Cross-filesystem Linux tests use `/dev/shm` for a second filesystem and verify both
+location policies, restore collisions, metadata preservation, and copy failures.
+
+There are no patched or vendored dependencies. The FreeDesktop implementation
+lives in `src/freedesktop.rs`, with mount discovery and transfer logic in
+`src/freedesktop/`. Linux uses an atomic no-replace rename for publication and
+restoration, and stages cross-filesystem copies in a private destination directory
+before publishing a complete payload. Interrupted copies can leave an unlisted
+staging directory; their original source data is retained. Metadata uses standard
+percent-encoded native paths and atomic receipt publication. Home receipts use
+absolute original paths; per-filesystem receipts use paths relative to their
+mount root, so they remain usable when a volume is mounted elsewhere. Linux discovery
+reads `/proc/self/mountinfo` so bind mounts and escaped mount names are respected.

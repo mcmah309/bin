@@ -1,5 +1,5 @@
 use crate::{
-    backend::{Backend, SystemTrash},
+    backend::{Backend, SystemTrash, TrashItem},
     cli::{Cli, Interactive, PreserveRoot},
     history::{ItemKey, Store, same_path},
 };
@@ -12,10 +12,14 @@ use std::{
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
 };
-use trash::TrashItem;
 
 pub fn run(cli: Cli) -> Result<bool> {
-    run_with(&cli, &mut SystemTrash, Store::default_dir()?)
+    let config = crate::config::Config::load(cli.config.as_deref())?;
+    run_with(
+        &cli,
+        &mut SystemTrash::new(config.trash_location),
+        Store::default_dir()?,
+    )
 }
 
 fn run_with(cli: &Cli, backend: &mut impl Backend, state_dir: PathBuf) -> Result<bool> {

@@ -1,0 +1,5 @@
+# Linux / FreeDesktop: keep all newly trashed files in the user's home trash.
+trash-location = "home"
+
+# Use the source filesystem's trash when possible (the previous behavior):
+# trash-location = "per-filesystem"

@@ -1,3 +1,4 @@
+use crate::backend::TrashItem;
 use anyhow::{Context, Result, bail};
 use fs2::FileExt;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
@@ -8,7 +9,6 @@ use std::{
     fs::{self, File, OpenOptions},
     path::PathBuf,
 };
-use trash::TrashItem;
 
 const APPLICATION_ID: i64 = 0x4249_4e31;
 const SCHEMA_VERSION: i64 = 1;

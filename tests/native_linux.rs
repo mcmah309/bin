@@ -10,6 +10,7 @@ use std::{
 
 struct Sandbox {
     _root: tempfile::TempDir,
+    _other_filesystem: Option<tempfile::TempDir>,
     work: PathBuf,
     state: PathBuf,
     data: PathBuf,
@@ -30,6 +31,7 @@ impl Sandbox {
             ),
             work,
             _root: root,
+            _other_filesystem: None,
         }
     }
 
@@ -44,6 +46,7 @@ impl Sandbox {
         command
             .current_dir(&self.work)
             .env("XDG_DATA_HOME", &self.data)
+            .env("XDG_CONFIG_HOME", self._root.path().join("config"))
             .env("BIN_STATE_DIR", &self.state)
             .env("TZ", "UTC");
         command
@@ -105,6 +108,413 @@ impl Sandbox {
             .query_row("SELECT count(*) FROM items", [], |row| row.get(0))
             .unwrap()
     }
+
+    fn with_home_on_another_filesystem() -> Self {
+        use std::os::unix::fs::MetadataExt;
+        let mut sandbox = Self::new();
+        let other = tempfile::Builder::new()
+            .prefix("bin-home-trash-")
+            .tempdir_in("/dev/shm")
+            .unwrap();
+        assert_ne!(
+            fs::metadata(&sandbox.work).unwrap().dev(),
+            fs::metadata(other.path()).unwrap().dev(),
+            "this test requires distinct filesystems"
+        );
+        sandbox.data = other.path().join("data");
+        sandbox._other_filesystem = Some(other);
+        sandbox
+    }
+
+    fn config(&self, text: &str) -> PathBuf {
+        let path = self._root.path().join("config/bin/config.toml");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, text).unwrap();
+        path
+    }
+
+    fn upstream(&self, action: &str, path: &Path) {
+        // A subprocess isolates the native library's environment without
+        // mutating process-global environment variables in parallel tests.
+        let result = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "upstream_worker", "--nocapture"])
+            .env("XDG_DATA_HOME", &self.data)
+            .env("TZ", "UTC")
+            .env("BIN_INTEROP_ACTION", action)
+            .env("BIN_INTEROP_PATH", path)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "upstream interoperability failed: {} {}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+#[test]
+fn upstream_worker() {
+    let Ok(action) = std::env::var("BIN_INTEROP_ACTION") else {
+        return;
+    };
+    let path = PathBuf::from(std::env::var_os("BIN_INTEROP_PATH").unwrap());
+    if action == "trash" {
+        trash::delete(path).unwrap();
+        return;
+    }
+    let items: Vec<_> = trash::os_limited::list()
+        .unwrap()
+        .into_iter()
+        .filter(|item| item.original_path() == path)
+        .collect();
+    assert_eq!(items.len(), 1);
+    trash::os_limited::metadata(&items[0]).unwrap();
+    if action == "restore" {
+        trash::os_limited::restore_all(items).unwrap();
+    } else {
+        assert_eq!(action, "inspect");
+    }
+}
+
+#[test]
+fn upstream_trash_and_existing_sqlite_history_remain_interoperable() {
+    use std::os::unix::ffi::OsStrExt;
+    let f = Sandbox::new();
+    let path = f.file("interop");
+    f.ok([path.as_os_str()]);
+    f.upstream("inspect", &path);
+    f.upstream("restore", &path);
+    assert_eq!(fs::read_to_string(&path).unwrap(), "interop");
+    assert!(!f.run(["-p"]).status.success()); // External restore reconciles history.
+    f.upstream("trash", &path);
+    assert!(!f.run(["-p"]).status.success()); // No invented invocation for another utility.
+    {
+        // Simulate history recorded by the old native backend: unchanged IDs,
+        // original-path BLOBs, timestamps, and invocation grouping must work.
+        let text = fs::read_to_string(f.info(&path)).unwrap();
+        let date = text
+            .lines()
+            .find_map(|line| line.strip_prefix("DeletionDate="))
+            .unwrap();
+        let deleted_at = chrono::NaiveDateTime::parse_from_str(date, "%Y-%m-%dT%H:%M:%S")
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        let database = rusqlite::Connection::open(f.state.join("history.sqlite3")).unwrap();
+        database
+            .execute("INSERT INTO invocations DEFAULT VALUES", [])
+            .unwrap();
+        let id = database.last_insert_rowid();
+        database.execute("INSERT INTO items(invocation_id, native_id, original, deleted_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![id, f.info(&path).as_os_str().as_bytes(), path.as_os_str().as_bytes(), deleted_at]).unwrap();
+    }
+    f.ok(["-p"]);
+    assert_eq!(fs::read_to_string(&path).unwrap(), "interop");
+    f.upstream("trash", &path);
+    let glob = format!("{}-*", f.prefix);
+    f.ok(["--empty", "--glob", &glob]);
+    assert!(!path.exists());
+    assert!(f.trash_files().is_empty());
+}
+
+#[test]
+fn orphaned_payloads_are_never_overwritten_or_claimed_by_new_receipts() {
+    let f = Sandbox::new();
+    let seed = f.file("seed");
+    f.ok([seed.as_os_str()]);
+    f.ok(["-p"]);
+    let path = f.file("collision");
+    fs::write(f.trashed(&path), "untracked orphan").unwrap();
+    f.ok([path.as_os_str()]);
+    assert_eq!(f.trash_files().len(), 2);
+    f.ok(["-p"]);
+    assert_eq!(fs::read_to_string(path.clone()).unwrap(), "collision");
+    assert_eq!(
+        fs::read_to_string(f.trashed(&path)).unwrap(),
+        "untracked orphan"
+    );
+    assert!(!f.info(&path).exists());
+}
+
+#[test]
+fn malformed_metadata_is_reported_without_blocking_other_files_or_erasing_data() {
+    let f = Sandbox::new();
+    let seed = f.file("seed");
+    f.ok([seed.as_os_str()]);
+    f.ok(["-p"]);
+    let broken = f.file("broken");
+    fs::rename(&broken, f.trashed(&broken)).unwrap();
+    let invalid = "[Trash Info]\nPath=%QQ\nnot a key/value\n";
+    fs::write(f.info(&broken), invalid).unwrap();
+    let valid = f.file("valid");
+    let output = f.ok([valid.as_os_str()]);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("skipping malformed trash receipt"));
+    f.ok(["-p"]);
+    assert_eq!(fs::read_to_string(valid).unwrap(), "valid");
+    assert_eq!(fs::read_to_string(f.trashed(&broken)).unwrap(), "broken");
+    assert_eq!(fs::read_to_string(f.info(&broken)).unwrap(), invalid);
+}
+
+#[test]
+fn long_names_round_trip_and_new_trash_metadata_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Sandbox::new();
+    let path = f.work.join("x".repeat(255));
+    fs::write(&path, "long name").unwrap();
+    f.ok([path.as_os_str()]);
+    assert_eq!(f.trash_files().len(), 1);
+    for dir in [
+        f.data.join("Trash"),
+        f.data.join("Trash/info"),
+        f.data.join("Trash/files"),
+    ] {
+        assert_eq!(
+            fs::metadata(dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+    let info = fs::read_dir(f.data.join("Trash/info"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert_eq!(
+        fs::metadata(info).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    f.ok(["-p"]);
+    assert_eq!(fs::read_to_string(path).unwrap(), "long name");
+}
+
+#[test]
+fn home_is_the_default_across_filesystems_and_versions_restore_without_overwriting() {
+    let f = Sandbox::with_home_on_another_filesystem();
+    let path = f.file("versioned");
+    let preview = f.ok([OsStr::new("--dry-run"), path.as_os_str()]);
+    assert!(preview.status.success());
+    assert!(path.exists());
+    assert!(!f.data.exists());
+    assert!(!f.state.exists());
+    f.ok([path.as_os_str()]);
+    assert_eq!(fs::read_to_string(f.trashed(&path)).unwrap(), "versioned");
+    fs::write(&path, "second version").unwrap();
+    f.ok([path.as_os_str()]);
+    assert_eq!(f.trash_files().len(), 2);
+    assert!(!f.run(["-p", "2"]).status.success());
+    assert!(!path.exists());
+    f.ok(["-p"]);
+    assert_eq!(fs::read_to_string(&path).unwrap(), "second version");
+    assert!(!f.run(["-fp"]).status.success());
+    let aside = f.work.join("restored-version");
+    fs::rename(&path, &aside).unwrap();
+    f.ok(["-p"]);
+    assert_eq!(fs::read_to_string(path).unwrap(), "versioned");
+    assert_eq!(fs::read_to_string(aside).unwrap(), "second version");
+    assert!(f.trash_files().is_empty());
+}
+
+#[test]
+fn cross_filesystem_trees_and_top_level_symlinks_preserve_contents_and_metadata() {
+    use std::{
+        os::unix::{
+            ffi::OsStringExt,
+            fs::{PermissionsExt, symlink},
+        },
+        time::{Duration, UNIX_EPOCH},
+    };
+    let f = Sandbox::with_home_on_another_filesystem();
+    let outside = f.file("outside");
+    let outside_dir = f.work.join("outside-directory");
+    fs::create_dir(&outside_dir).unwrap();
+    let tree = f.work.join(format!("{}-tree", f.prefix));
+    fs::create_dir(&tree).unwrap();
+    let child = tree.join("child");
+    fs::write(&child, b"binary\0content").unwrap();
+    let modified = UNIX_EPOCH + Duration::from_secs(1_600_000_000);
+    fs::File::open(&child)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    fs::set_permissions(&child, fs::Permissions::from_mode(0o640)).unwrap();
+    fs::set_permissions(&tree, fs::Permissions::from_mode(0o750)).unwrap();
+    symlink(&outside, tree.join("external-link")).unwrap();
+    let directory_link = f.work.join(format!("{}-directory-link", f.prefix));
+    symlink(&outside_dir, &directory_link).unwrap();
+    let binary_link = f.work.join(OsString::from_vec(
+        [f.prefix.as_bytes(), b"-binary-\xff"].concat(),
+    ));
+    symlink("missing-target", &binary_link).unwrap();
+    f.ok([
+        OsStr::new("-r"),
+        tree.as_os_str(),
+        directory_link.as_os_str(),
+        binary_link.as_os_str(),
+    ]);
+    assert_eq!(fs::read_to_string(&outside).unwrap(), "outside");
+    assert!(outside_dir.exists());
+    assert_eq!(
+        fs::read_link(f.trashed(&directory_link)).unwrap(),
+        outside_dir
+    );
+    assert_eq!(
+        fs::read_link(f.trashed(&binary_link)).unwrap(),
+        Path::new("missing-target")
+    );
+    f.ok(["-p"]);
+    assert_eq!(fs::read(&child).unwrap(), b"binary\0content");
+    assert_eq!(fs::metadata(&child).unwrap().modified().unwrap(), modified);
+    assert_eq!(
+        fs::metadata(&child).unwrap().permissions().mode() & 0o777,
+        0o640
+    );
+    assert_eq!(
+        fs::metadata(&tree).unwrap().permissions().mode() & 0o777,
+        0o750
+    );
+    assert_eq!(fs::read_link(tree.join("external-link")).unwrap(), outside);
+    assert_eq!(fs::read_link(directory_link).unwrap(), outside_dir);
+    assert_eq!(
+        fs::read_link(binary_link).unwrap(),
+        Path::new("missing-target")
+    );
+}
+
+#[test]
+fn failed_cross_filesystem_copy_keeps_source_and_retryable_restore_keeps_trash() {
+    use std::os::unix::net::UnixListener;
+    let f = Sandbox::with_home_on_another_filesystem();
+    let tree = f.work.join(format!("{}-tree", f.prefix));
+    fs::create_dir(&tree).unwrap();
+    fs::write(tree.join("data"), "keep this data").unwrap();
+    let socket = tree.join("socket");
+    let listener = UnixListener::bind(&socket).unwrap();
+    assert!(!f.run([OsStr::new("-r"), tree.as_os_str()]).status.success());
+    assert_eq!(
+        fs::read_to_string(tree.join("data")).unwrap(),
+        "keep this data"
+    );
+    assert!(socket.exists());
+    assert!(f.trash_files().is_empty());
+    assert_eq!(f.receipt_count(), 0);
+    drop(listener);
+    fs::remove_file(socket).unwrap();
+    f.ok([OsStr::new("-r"), tree.as_os_str()]);
+    // An unsupported entry added to a trashed directory must not leave a partial
+    // destination or consume history when restoration fails partway through.
+    let bad = f.trashed(&tree).join("socket");
+    let listener = UnixListener::bind(&bad).unwrap();
+    assert!(!f.run(["-p"]).status.success());
+    assert!(!tree.exists());
+    assert_eq!(
+        fs::read_to_string(f.trashed(&tree).join("data")).unwrap(),
+        "keep this data"
+    );
+    assert_eq!(f.receipt_count(), 1);
+    drop(listener);
+    fs::remove_file(bad).unwrap();
+    f.ok(["-p"]);
+    assert_eq!(
+        fs::read_to_string(tree.join("data")).unwrap(),
+        "keep this data"
+    );
+}
+
+#[test]
+fn invalid_or_explicitly_missing_config_fails_before_trashing_or_creating_state() {
+    let f = Sandbox::new();
+    let path = f.file("keep");
+    for text in [
+        "trash-location = 'unknown'",
+        "trash_location = 'home'",
+        "not valid TOML",
+    ] {
+        f.config(text);
+        assert!(!f.run([path.as_os_str()]).status.success());
+        assert!(path.exists());
+        assert!(!f.state.exists());
+        assert!(!f.data.exists());
+    }
+    let missing = f.work.join("missing-config");
+    assert!(
+        !f.run([
+            OsStr::new("--config"),
+            missing.as_os_str(),
+            path.as_os_str()
+        ])
+        .status
+        .success()
+    );
+    assert!(path.exists());
+    assert!(!f.state.exists());
+}
+
+#[test]
+fn unusable_home_trash_fails_without_falling_back_to_the_source_mount() {
+    let f = Sandbox::with_home_on_another_filesystem();
+    fs::write(&f.data, "this blocks the home trash directory").unwrap();
+    let path = f.file("keep-at-source");
+    assert!(!f.run([path.as_os_str()]).status.success());
+    assert_eq!(fs::read_to_string(&path).unwrap(), "keep-at-source");
+    assert_eq!(
+        fs::read_to_string(&f.data).unwrap(),
+        "this blocks the home trash directory"
+    );
+    assert_eq!(f.receipt_count(), 0);
+}
+
+#[test]
+fn per_filesystem_config_and_explicit_override_only_affect_new_trash_locations() {
+    use std::os::unix::fs::MetadataExt;
+    let f = Sandbox::new();
+    let source = tempfile::Builder::new()
+        .prefix("bin-volume-policy-")
+        .tempdir_in("/dev/shm")
+        .unwrap();
+    assert_ne!(
+        fs::metadata(source.path()).unwrap().dev(),
+        fs::metadata(&f.work).unwrap().dev()
+    );
+    f.config("trash-location = 'per-filesystem'");
+    let file = source.path().join(format!("{}-volume", f.prefix));
+    fs::write(&file, "volume").unwrap();
+    f.ok([file.as_os_str()]);
+    assert!(!f.trashed(&file).exists());
+    let database = rusqlite::Connection::open(f.state.join("history.sqlite3")).unwrap();
+    let native: Vec<u8> = database
+        .query_row("SELECT native_id FROM items", [], |row| row.get(0))
+        .unwrap();
+    use std::os::unix::ffi::OsStringExt;
+    let info = PathBuf::from(OsString::from_vec(native));
+    assert!(info.starts_with("/dev/shm"));
+    let receipt = fs::read_to_string(&info).unwrap();
+    assert!(
+        !receipt
+            .lines()
+            .find_map(|line| line.strip_prefix("Path="))
+            .unwrap()
+            .starts_with('/')
+    );
+    drop(database);
+    // Switch policy before undo; existing receipts retain their native locations.
+    let home_config = f.work.join("home.toml");
+    fs::write(&home_config, "trash-location = 'home'").unwrap();
+    f.ok([
+        OsStr::new("--config"),
+        home_config.as_os_str(),
+        OsStr::new("-p"),
+    ]);
+    assert_eq!(fs::read_to_string(&file).unwrap(), "volume");
+    f.ok([
+        OsStr::new("--config"),
+        home_config.as_os_str(),
+        file.as_os_str(),
+    ]);
+    assert_eq!(fs::read_to_string(f.trashed(&file)).unwrap(), "volume");
+    // The default config is still per-filesystem; pop works for home entries too.
+    f.ok(["-p"]);
+    assert_eq!(fs::read_to_string(file).unwrap(), "volume");
 }
 
 #[test]
