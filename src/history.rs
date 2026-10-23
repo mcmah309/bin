@@ -129,8 +129,10 @@ impl rusqlite::types::FromSql for NativeString {
             }
             Ok(Self {
                 units: bytes
-                    .chunks_exact(2)
-                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| u16::from_le_bytes(*pair))
                     .collect(),
             })
         }
@@ -590,7 +592,15 @@ mod tests {
             .unwrap()
             .map(|entry| {
                 let entry = entry.unwrap();
-                (entry.file_name(), fs::read(entry.path()).unwrap())
+                let name = entry.file_name();
+                let contents = if name == "history.lock" {
+                    // Windows locks block reads of this empty coordination file.
+                    assert_eq!(entry.metadata().unwrap().len(), 0);
+                    Vec::new()
+                } else {
+                    fs::read(entry.path()).unwrap()
+                };
+                (name, contents)
             })
             .collect();
         entries.sort();

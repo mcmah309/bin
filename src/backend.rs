@@ -33,22 +33,30 @@ pub trait Backend {
     fn purge(&mut self, item: &TrashItem) -> Result<()>;
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
-pub type SystemTrash = crate::freedesktop::FreedesktopTrash;
+pub struct SystemTrash {
+    context: system_trash::TrashContext,
+}
 
-#[cfg(any(windows, target_os = "macos"))]
-pub struct SystemTrash;
-
-#[cfg(any(windows, target_os = "macos"))]
 impl SystemTrash {
     pub fn new(_location: crate::config::TrashLocation) -> Self {
-        Self
+        let context = system_trash::TrashContext::new();
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let context = {
+            use system_trash::freedesktop::{TrashContextExtFreedesktop, TrashLocation};
+            let mut context = context;
+            context.set_trash_location(match _location {
+                crate::config::TrashLocation::Home => TrashLocation::Home,
+                crate::config::TrashLocation::PerFilesystem => TrashLocation::PerFilesystem,
+            });
+            context
+        };
+        Self { context }
     }
 }
 
-#[cfg(windows)]
-impl From<trash::TrashItem> for TrashItem {
-    fn from(item: trash::TrashItem) -> Self {
+#[cfg(not(target_os = "macos"))]
+impl From<system_trash::TrashItem> for TrashItem {
+    fn from(item: system_trash::TrashItem) -> Self {
         Self {
             id: item.id,
             name: item.name,
@@ -58,8 +66,8 @@ impl From<trash::TrashItem> for TrashItem {
     }
 }
 
-#[cfg(windows)]
-impl From<TrashItem> for trash::TrashItem {
+#[cfg(not(target_os = "macos"))]
+impl From<TrashItem> for system_trash::TrashItem {
     fn from(item: TrashItem) -> Self {
         Self {
             id: item.id,
@@ -70,10 +78,10 @@ impl From<TrashItem> for trash::TrashItem {
     }
 }
 
-#[cfg(windows)]
+#[cfg(not(target_os = "macos"))]
 impl Backend for SystemTrash {
     fn list(&self) -> Result<Vec<TrashItem>> {
-        Ok(trash::os_limited::list()?
+        Ok(system_trash::os_limited::list()?
             .into_iter()
             .map(TrashItem::from)
             .collect())
@@ -81,32 +89,43 @@ impl Backend for SystemTrash {
 
     fn available(&self, item: &TrashItem) -> Result<bool> {
         use eros::{Context, IntoAnyUnion};
-        match trash::os_limited::metadata(&item.clone().into()) {
+        match system_trash::os_limited::metadata(&item.clone().into()) {
             Ok(_) => Ok(true),
-            Err(trash::Error::Os { code, .. })
+            #[cfg(windows)]
+            Err(system_trash::Error::Os { code, .. })
                 if matches!(code as u32, 0x80070002 | 0x80070003) =>
+            {
+                Ok(false)
+            }
+            #[cfg(unix)]
+            Err(system_trash::Error::FileSystem { source, .. })
+                if matches!(
+                    source.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
             {
                 Ok(false)
             }
             Err(error) => Err(error)
                 .any_union()
-                .context("cannot inspect Recycle Bin item"),
+                .context("cannot inspect system trash item"),
         }
     }
 
     fn trash(&mut self, path: &Path) -> Result<()> {
-        Ok(trash::delete(path)?)
+        Ok(self.context.delete(path)?)
     }
 
     fn restore(&mut self, item: TrashItem) -> Result<()> {
+        #[cfg(windows)]
         std::fs::create_dir_all(&item.original_parent)?;
-        Ok(trash::os_limited::restore_all([item.into()])?)
+        Ok(system_trash::os_limited::restore_all([item.into()])?)
     }
 
     fn purge(&mut self, item: &TrashItem) -> Result<()> {
-        Ok(trash::os_limited::purge_all([trash::TrashItem::from(
-            item.clone(),
-        )])?)
+        Ok(system_trash::os_limited::purge_all([
+            system_trash::TrashItem::from(item.clone()),
+        ])?)
     }
 }
 
@@ -119,7 +138,7 @@ impl Backend for SystemTrash {
         eros::bail!("listing, pop, and empty are not yet supported on macOS")
     }
     fn trash(&mut self, path: &Path) -> Result<()> {
-        Ok(trash::delete(path)?)
+        Ok(self.context.delete(path)?)
     }
     fn restore(&mut self, _: TrashItem) -> Result<()> {
         eros::bail!("pop is not yet supported on macOS")
