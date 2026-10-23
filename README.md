@@ -2,15 +2,21 @@
 
 `bin` is an `rm`-style Rust CLI that moves files into the operating system's trash.
 It adds undo by **command invocation**, filtered permanent cleanup, and previews
-for every operation. `bin` implements FreeDesktop trash storage directly on Linux
-and other supported Unix systems. Windows and macOS use the unmodified upstream
-[trash crate](https://docs.rs/trash/).
+for every operation. System trash operations use our
+[fork of the trash crate](https://github.com/mcmah309/trash-rs), pinned as a Git
+submodule while its FreeDesktop improvements are proposed upstream. Windows and
+macOS retain the crate's native operating system implementations.
+The upstream changes are tracked in [trash-rs#155](https://github.com/Byron/trash-rs/pull/155).
 
 ## Install
 
 ```sh
+git submodule update --init --recursive
 cargo install --path . --locked
 ```
+
+When cloning a new checkout, use `git clone --recurse-submodules` to fetch the
+fork together with `bin`.
 
 Building requires Rust and a C compiler for the bundled SQLite library. SQLite
 does not need to be installed separately. Cross-compilation also requires a C
@@ -233,7 +239,7 @@ matching receipts from pop history.
 The full workflow targets Linux and Windows. macOS trashing currently emits a
 notice that undo history is unavailable. macOS pop/empty need a separate native
 backend or upstream support; `bin` does not replace system trash with a private
-directory to emulate them. Other Unix platforms use `bin`'s mount discovery;
+directory to emulate them. Other Unix platforms use the fork's mount discovery;
 BSD support is implemented but is not covered by the native CI matrix.
 Configuration lives under the platform's user config directory (`%APPDATA%/bin`
 on Windows, `~/Library/Application Support/bin` on macOS); `--config` overrides it.
@@ -266,8 +272,9 @@ cargo clippy --all-targets -- -D warnings
 cargo test --locked
 ```
 
-Unit tests use a filesystem-backed mock trash and test the storage primitives.
-Linux integration tests exercise `bin`'s own backend with isolated XDG data and
+Unit tests exercise the CLI and history with a filesystem-backed mock trash;
+the fork's tests cover the storage primitives.
+Linux integration tests exercise the fork through `bin` with isolated XDG data and
 history directories; permanent cleanup tests select unique sandbox filenames
 and never empty a global trash. Interoperability tests use the unmodified upstream
 `trash` crate in a subprocess to inspect and restore entries written by `bin`,
@@ -277,10 +284,13 @@ and private permissions are covered.
 Cross-filesystem Linux tests use `/dev/shm` for a second filesystem and verify both
 location policies, restore collisions, metadata preservation, and copy failures.
 
-There are no patched or vendored dependencies. The FreeDesktop implementation
-lives in `src/freedesktop.rs`, with mount discovery and transfer logic in
-`src/freedesktop/`. Linux uses an atomic no-replace rename for publication and
-restoration, and stages cross-filesystem copies in a private destination directory
+The `vendor/trash-rs` submodule is the normal `system_trash` path dependency;
+the separate `trash` dev-dependency remains the unmodified published crate for
+interoperability tests. Initialize the submodule before building or running checks.
+The fork owns FreeDesktop storage, mount discovery, and transfer logic; `bin`
+keeps configuration, CLI validation, and invocation history. Linux uses an atomic
+no-replace rename for publication and restoration, and stages cross-filesystem
+copies in a private destination directory
 before publishing a complete payload. Interrupted copies can leave an unlisted
 staging directory; their original source data is retained. Metadata uses standard
 percent-encoded native paths and atomic receipt publication. Home receipts use

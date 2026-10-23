@@ -1,0 +1,3 @@
+[submodule "vendor/trash-rs"]
+	path = vendor/trash-rs
+	url = git@github.com:mcmah309/trash-rs.git

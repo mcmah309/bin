@@ -13,20 +13,13 @@ dunce = "1.0.5"
 eros = "0.8.1"
 fs2 = "0.4.3"
 globset = "0.4.20"
+log = "0.4"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 toml = "1.1.8"
-tempfile = "3.27.0"
-
-[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
-rustix = { version = "1.1.5", features = ["fs", "process"] }
-
-[target.'cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))'.dependencies]
-libc = "0.2.191"
-
-[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
-trash = { version = "5.2.9", features = ["chrono"] }
+system_trash = { package = "trash", path = "vendor/trash-rs", features = ["chrono"] }
 
 [dev-dependencies]
+tempfile = "3.27.0"
 trash = { version = "5.2.9", features = ["chrono"] }
