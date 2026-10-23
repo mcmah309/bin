@@ -7,8 +7,8 @@ use crate::{
     backend::{Backend, TrashItem},
     config::TrashLocation,
 };
-use anyhow::{Context, Result, bail};
 use chrono::{Local, NaiveDateTime, TimeZone};
+use eros::{Context, IntoAnyUnion, Result, bail};
 use std::{
     collections::HashSet,
     ffi::{OsStr, OsString},
@@ -115,11 +115,9 @@ impl FreedesktopTrash {
         match prepare(&root) {
             Ok(()) => Ok(root),
             Err(error)
-                if error.chain().any(|cause| {
-                    cause
-                        .downcast_ref::<io::Error>()
-                        .is_some_and(|error| error.kind() == io::ErrorKind::PermissionDenied)
-                }) =>
+                if error
+                    .downcast_inner_ref::<io::Error>()
+                    .is_some_and(|error| error.kind() == io::ErrorKind::PermissionDenied) =>
             {
                 Ok(home)
             }
@@ -199,6 +197,7 @@ impl Backend for FreedesktopTrash {
                     Err(error) if missing(&error) => continue,
                     Err(error) => {
                         return Err(error)
+                            .any_union()
                             .with_context(|| format!("cannot read trash receipt {path:?}"));
                     }
                 };
@@ -208,7 +207,7 @@ impl Backend for FreedesktopTrash {
                 match parse_receipt(&path, &bytes, &directory.original_base) {
                     Ok(item) => items.push(item),
                     Err(error) => {
-                        eprintln!("bin: skipping malformed trash receipt {path:?}: {error:#}")
+                        eprintln!("bin: skipping malformed trash receipt {path:?}: {error:#?}")
                     }
                 }
             }
@@ -221,9 +220,9 @@ impl Backend for FreedesktopTrash {
         match payload.symlink_metadata() {
             Ok(_) => Ok(true),
             Err(error) if missing(&error) => Ok(false),
-            Err(error) => {
-                Err(error).with_context(|| format!("cannot inspect trash payload {payload:?}"))
-            }
+            Err(error) => Err(error)
+                .any_union()
+                .with_context(|| format!("cannot inspect trash payload {payload:?}")),
         }
     }
 
@@ -280,7 +279,11 @@ impl Backend for FreedesktopTrash {
             {
                 Ok(file) => drop(file),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(error).context("cannot reserve a trash receipt"),
+                Err(error) => {
+                    return Err(error)
+                        .any_union()
+                        .context("cannot reserve a trash receipt");
+                }
             }
             let mut reservation = ReceiptReservation {
                 path: info.clone(),
@@ -311,7 +314,11 @@ impl Backend for FreedesktopTrash {
                         Ok(())
                     });
                 }
-                Err(error) => return Err(error).context("cannot move source into trash"),
+                Err(error) => {
+                    return Err(error)
+                        .any_union()
+                        .context("cannot move source into trash");
+                }
             }
         }
         unreachable!("all possible trash filenames exhausted")
@@ -328,6 +335,7 @@ impl Backend for FreedesktopTrash {
             }
             Err(error) => {
                 return Err(error)
+                    .any_union()
                     .with_context(|| format!("cannot restore without overwriting {target:?}"));
             }
         }
@@ -359,7 +367,9 @@ fn checked_directory(path: &Path, create: bool) -> Result<bool> {
             path.symlink_metadata()?
         }
         Err(error) => {
-            return Err(error).with_context(|| format!("cannot inspect trash directory {path:?}"));
+            return Err(error)
+                .any_union()
+                .with_context(|| format!("cannot inspect trash directory {path:?}"));
         }
     };
     if !metadata.is_dir()
@@ -384,7 +394,9 @@ fn shared_trash(path: &Path) -> Result<bool> {
             && !metadata.file_type().is_symlink()
             && metadata.mode() & 0o1000 != 0),
         Err(error) if missing(&error) => Ok(false),
-        Err(error) => Err(error).with_context(|| format!("cannot inspect shared trash {path:?}")),
+        Err(error) => Err(error)
+            .any_union()
+            .with_context(|| format!("cannot inspect shared trash {path:?}")),
     }
 }
 

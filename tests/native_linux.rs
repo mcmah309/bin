@@ -430,22 +430,27 @@ fn invalid_or_explicitly_missing_config_fails_before_trashing_or_creating_state(
         "trash_location = 'home'",
         "not valid TOML",
     ] {
-        f.config(text);
-        assert!(!f.run([path.as_os_str()]).status.success());
+        let config = f.config(text);
+        let output = f.run([path.as_os_str()]);
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("invalid config"), "{stderr}");
+        assert!(stderr.contains(config.to_str().unwrap()), "{stderr}");
         assert!(path.exists());
         assert!(!f.state.exists());
         assert!(!f.data.exists());
     }
     let missing = f.work.join("missing-config");
-    assert!(
-        !f.run([
-            OsStr::new("--config"),
-            missing.as_os_str(),
-            path.as_os_str()
-        ])
-        .status
-        .success()
-    );
+    let output = f.run([
+        OsStr::new("--config"),
+        missing.as_os_str(),
+        path.as_os_str(),
+    ]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cannot read config"), "{stderr}");
+    assert!(stderr.contains(missing.to_str().unwrap()), "{stderr}");
+    assert!(stderr.contains("os error"), "{stderr}");
     assert!(path.exists());
     assert!(!f.state.exists());
 }
@@ -908,6 +913,19 @@ fn invalid_selectors_and_dry_run_never_create_state_or_trash() {
         vec!["-p", "0"],
     ] {
         assert!(!f.run(flags).status.success());
+    }
+    for (age, expected) in [
+        ("999999999999999999999999yr", "age value is too large"),
+        ("18446744073709551615wk", "age is too large"),
+        (
+            "4294967295mo",
+            "age is outside the supported calendar range",
+        ),
+    ] {
+        let output = f.run(["--empty", "--older-than", age]);
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(expected), "{stderr}");
     }
     assert!(a.exists());
     assert!(!f.state.exists());

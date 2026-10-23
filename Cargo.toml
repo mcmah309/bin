@@ -6,11 +6,11 @@ description = "An rm-style CLI with system trash, invocation undo, and filtered 
 license = "Apache-2.0"
 
 [dependencies]
-anyhow = "1.0.104"
 chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.7", features = ["derive"] }
 directories = "6.0.0"
 dunce = "1.0.5"
+eros = "0.8.1"
 fs2 = "0.4.3"
 globset = "0.4.20"
 rusqlite = { version = "0.40.2", features = ["bundled"] }

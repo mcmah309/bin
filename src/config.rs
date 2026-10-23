@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use eros::{Context, IntoAnyUnion, Result};
 use serde::Deserialize;
 use std::{
     fs,
@@ -41,10 +41,14 @@ impl Config {
                 return Ok(Self::default());
             }
             Err(error) => {
-                return Err(error).with_context(|| format!("cannot read config {path:?}"));
+                return Err(error)
+                    .any_union()
+                    .with_context(|| format!("cannot read config {path:?}"));
             }
         };
-        toml::from_str(&text).with_context(|| format!("invalid config {path:?}"))
+        toml::from_str(&text)
+            .with_context(|| format!("invalid config {path:?}"))
+            .any_union()
     }
 }
 

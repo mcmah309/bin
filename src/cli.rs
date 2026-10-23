@@ -1,6 +1,10 @@
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 
+fn parse_age(value: &str) -> Result<crate::age::Age, String> {
+    value.parse().map_err(|error| format!("{error:#?}"))
+}
+
 #[derive(Debug, Parser)]
 #[command(
     version,
@@ -44,7 +48,7 @@ pub struct Cli {
     #[arg(long, requires = "empty", conflicts_with_all = ["older_than", "glob"])]
     pub all: bool,
     /// Select entries trashed before this age (yr, mo, wk, d, h, min, s)
-    #[arg(long, requires = "empty", value_name = "AGE")]
+    #[arg(long, requires = "empty", value_name = "AGE", value_parser = parse_age)]
     pub older_than: Option<crate::age::Age>,
     /// Select entries by original basename; quote the pattern to prevent shell expansion
     #[arg(long, requires = "empty", value_name = "PATTERN")]

@@ -1,4 +1,4 @@
-use anyhow::Result;
+use eros::Result;
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
@@ -80,7 +80,7 @@ impl Backend for SystemTrash {
     }
 
     fn available(&self, item: &TrashItem) -> Result<bool> {
-        use anyhow::Context;
+        use eros::{Context, IntoAnyUnion};
         match trash::os_limited::metadata(&item.clone().into()) {
             Ok(_) => Ok(true),
             Err(trash::Error::Os { code, .. })
@@ -88,7 +88,9 @@ impl Backend for SystemTrash {
             {
                 Ok(false)
             }
-            Err(error) => Err(error).context("cannot inspect Recycle Bin item"),
+            Err(error) => Err(error)
+                .any_union()
+                .context("cannot inspect Recycle Bin item"),
         }
     }
 
@@ -114,15 +116,15 @@ impl Backend for SystemTrash {
         false
     }
     fn list(&self) -> Result<Vec<TrashItem>> {
-        anyhow::bail!("listing, pop, and empty are not yet supported on macOS")
+        eros::bail!("listing, pop, and empty are not yet supported on macOS")
     }
     fn trash(&mut self, path: &Path) -> Result<()> {
         Ok(trash::delete(path)?)
     }
     fn restore(&mut self, _: TrashItem) -> Result<()> {
-        anyhow::bail!("pop is not yet supported on macOS")
+        eros::bail!("pop is not yet supported on macOS")
     }
     fn purge(&mut self, _: &TrashItem) -> Result<()> {
-        anyhow::bail!("empty is not yet supported on macOS")
+        eros::bail!("empty is not yet supported on macOS")
     }
 }

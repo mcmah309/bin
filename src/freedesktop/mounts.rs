@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use eros::{Context, Result, bail};
 use std::{
     ffi::OsString,
     os::unix::ffi::OsStringExt,
@@ -107,7 +107,7 @@ pub fn mounted_roots() -> Result<Mounts> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = LOCK
         .lock()
-        .map_err(|_| anyhow::anyhow!("mount table lock was poisoned"))?;
+        .map_err(|_| eros::error!("mount table lock was poisoned"))?;
     #[cfg(target_os = "netbsd")]
     let mut buffer: *mut libc::statvfs = std::ptr::null_mut();
     #[cfg(not(target_os = "netbsd"))]
@@ -156,11 +156,11 @@ pub fn mounted_roots() -> Result<Mounts> {
 }
 
 pub fn containing<'a>(roots: &'a [PathBuf], path: &Path) -> Result<&'a Path> {
-    roots
+    Ok(roots
         .iter()
         .find(|root| path.starts_with(root))
         .map(PathBuf::as_path)
-        .context("path has no known mount point")
+        .context("path has no known mount point")?)
 }
 
 pub fn canonical_prefix(path: &Path) -> Result<PathBuf> {

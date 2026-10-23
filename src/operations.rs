@@ -3,8 +3,8 @@ use crate::{
     cli::{Cli, Interactive, PreserveRoot},
     history::{ItemKey, Store, same_path},
 };
-use anyhow::{Context, Result, bail};
 use chrono::Utc;
+use eros::{Context, IntoAnyUnion, Result, bail};
 use globset::{GlobBuilder, GlobMatcher};
 use std::{
     collections::HashSet,
@@ -135,7 +135,7 @@ fn trash_paths(
                 Ok(value) => value,
                 Err(error)
                     if cli.force
-                        && error.downcast_ref::<io::Error>().is_some_and(|e| {
+                        && error.downcast_inner_ref::<io::Error>().is_some_and(|e| {
                             matches!(
                                 e.kind(),
                                 io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
@@ -204,7 +204,7 @@ fn trash_paths(
             Ok(())
         })();
         if let Err(error) = result {
-            eprintln!("bin: cannot trash {operand:?}: {error:#}");
+            eprintln!("bin: cannot trash {operand:?}: {error:#?}");
             success = false;
             // Continuing could replace a pending receipt and lose undo history.
             if store.has_pending()? {
@@ -363,6 +363,7 @@ fn preflight_restore(items: &[TrashItem]) -> Result<()> {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => {
                 return Err(error)
+                    .any_union()
                     .with_context(|| format!("cannot check restore destination {path:?}"));
             }
         }
@@ -377,6 +378,7 @@ fn preflight_restore(items: &[TrashItem]) -> Result<()> {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => {
                     return Err(error)
+                        .any_union()
                         .with_context(|| format!("cannot check restore parent {parent:?}"));
                 }
             }
@@ -425,7 +427,7 @@ fn empty(
         }
         if !cli.dry_run {
             if let Err(error) = backend.purge(item) {
-                eprintln!("bin: cannot permanently delete trashed {path:?}: {error:#}");
+                eprintln!("bin: cannot permanently delete trashed {path:?}: {error:#?}");
                 success = false;
                 continue;
             }

@@ -15,7 +15,7 @@ fn main() -> ExitCode {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,
         Err(error) => {
-            eprintln!("bin: {error:#}");
+            eprintln!("bin: {error:#?}");
             ExitCode::FAILURE
         }
     }

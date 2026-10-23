@@ -1,5 +1,5 @@
 use crate::backend::TrashItem;
-use anyhow::{Context, Result, bail};
+use eros::{Context, IntoAnyUnion, Result, bail};
 use fs2::FileExt;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
@@ -371,7 +371,7 @@ impl Store {
                             );
                         }
                         Err(error) => {
-                            return Err(error).with_context(|| {
+                            return Err(error).any_union().with_context(|| {
                                 format!("cannot inspect interrupted trash source {path:?}")
                             });
                         }
@@ -533,7 +533,11 @@ fn initialize(connection: &mut Connection, dir: &std::path::Path) -> Result<()> 
             Some(history)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error).context("cannot read legacy history.json"),
+        Err(error) => {
+            return Err(error)
+                .any_union()
+                .context("cannot read legacy history.json");
+        }
     };
     let transaction = connection.transaction()?;
     transaction.execute_batch(SCHEMA)?;

@@ -1,5 +1,5 @@
-use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Duration, Months, Utc};
+use eros::{Context, Result, bail};
 use std::str::FromStr;
 
 /// Calendar months first, followed by fixed-length units.
@@ -11,14 +11,15 @@ pub struct Age {
 
 impl Age {
     pub fn cutoff(&self, now: DateTime<Utc>) -> Result<DateTime<Utc>> {
-        now.checked_sub_months(Months::new(self.months))
+        Ok(now
+            .checked_sub_months(Months::new(self.months))
             .and_then(|date| date.checked_sub_signed(Duration::try_seconds(self.seconds)?))
-            .context("age is outside the supported calendar range")
+            .context("age is outside the supported calendar range")?)
     }
 }
 
 impl FromStr for Age {
-    type Err = anyhow::Error;
+    type Err = eros::ErrorUnion;
 
     fn from_str(input: &str) -> Result<Self> {
         let mut rest = input.trim();
@@ -32,7 +33,7 @@ impl FromStr for Age {
                 bail!("invalid age {input:?}: expected an unsigned integer and a unit");
             }
             let count: u64 = rest[..count_end]
-                .parse()
+                .parse::<u64>()
                 .context("age value is too large")?;
             rest = rest[count_end..].trim_start();
             let unit_end = rest

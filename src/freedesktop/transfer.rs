@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use eros::{Context, IntoAnyUnion, Result, bail};
 use std::{
     fs::{self, File, OpenOptions},
     io,
@@ -40,6 +40,7 @@ pub fn sync_directory(path: &Path) -> Result<()> {
     File::open(path)?
         .sync_all()
         .with_context(|| format!("cannot sync directory {path:?}"))
+        .any_union()
 }
 
 /// Stage on the destination filesystem, publish the complete copy without
@@ -62,7 +63,9 @@ pub fn copy_then_remove(
     }
     if let Err(error) = rename_new(&payload, target) {
         let _ = discard(&payload);
-        return Err(error).with_context(|| format!("cannot publish copied item at {target:?}"));
+        return Err(error)
+            .any_union()
+            .with_context(|| format!("cannot publish copied item at {target:?}"));
     }
     let ready = sync_directory(parent).and_then(|_| before_remove());
     if let Err(error) = ready {
