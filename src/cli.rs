@@ -5,7 +5,7 @@ use std::path::PathBuf;
 #[command(
     version,
     about = "Move files to the system trash; undo by invocation.",
-    after_help = "Examples:\n  bin -rf build/\n  bin -p             Restore the last invocation\n  bin -p 3           Restore the last three invocations\n  bin --empty --older-than '2mo 3d' --glob '*.txt'\n  bin --empty --all --dry-run\n\nPop never overwrites, even with -f. Emptying permanently deletes matching trash entries."
+    after_help = "Examples:\n  bin -rf build/\n  bin -p             Restore the last invocation\n  bin -p 3           Restore the last three invocations\n  bin --empty --older-than '2mo 3d' --glob '*.txt'\n  bin --empty --all --dry-run\n\nEmpty filters combine with AND. For OR, run separate commands.\n--all cannot be combined with --older-than or --glob.\nPop never overwrites, even with -f. Emptying permanently deletes matching trash entries."
 )]
 pub struct Cli {
     /// Ignore nonexistent operands and never prompt (does not allow overwriting on pop)
@@ -37,7 +37,7 @@ pub struct Cli {
     /// Permanently delete trash entries; requires --all, --older-than, or --glob
     #[arg(long)]
     pub empty: bool,
-    /// Select every item in the system trash
+    /// Select every item in the system trash; cannot combine with --older-than or --glob
     #[arg(long, requires = "empty", conflicts_with_all = ["older_than", "glob"])]
     pub all: bool,
     /// Select entries trashed before this age (yr, mo, wk, d, h, min, s)
@@ -112,6 +112,7 @@ mod tests {
             vec!["bin", "-p", "0"],
             vec!["bin", "-p", "file"],
             vec!["bin", "--empty", "--all", "--glob", "*"],
+            vec!["bin", "--empty", "--all", "--older-than", "2mo"],
         ] {
             assert!(Cli::try_parse_from(args).is_err());
         }

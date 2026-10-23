@@ -100,8 +100,19 @@ does not expand them first. Patterns are case sensitive and support `*`, `?`,
 character classes, and `{a,b}` alternatives.
 
 At least one selector is required. `--older-than` and `--glob` combine with **AND**:
-an entry must satisfy both. `--all` is exclusive with filters to avoid silently
-broadening a selection. There is no implicit selection for bare `--empty`.
+an entry must satisfy both. For example, `--empty --older-than '2mo' --glob '*.txt'`
+deletes only `.txt` entries trashed more than two months ago.
+
+For **OR**, run two separate commands:
+
+```sh
+bin --empty --older-than '2mo'
+bin --empty --glob '*.txt'
+```
+
+These delete entries older than two months **or** matching `*.txt`.
+`--all` cannot be combined with `--older-than` or `--glob`; the CLI rejects these
+combinations. There is no implicit selection for bare `--empty`.
 
 | Age unit | Meaning |
 | --- | --- |
